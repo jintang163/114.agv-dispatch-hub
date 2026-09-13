@@ -1,0 +1,42 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: agv-scheduler
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/agv_fleet}
+    username: ${SPRING_DATASOURCE_USERNAME:agv}
+    password: ${SPRING_DATASOURCE_PASSWORD:agv123}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: Asia/Shanghai
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+mqtt:
+  broker: ${MQTT_BROKER:tcp://localhost:1883}
+  client-id-prefix: scheduler
+  username: ${MQTT_USER:}
+  password: ${MQTT_PASSWORD:}
+  qos: 1
+
+agv:
+  # 调度 tick：取出到期可执行任务
+  dispatch-tick-ms: 1000
+  # AGV 心跳超时（毫秒），超过则判定宕机并强制重分配
+  heartbeat-timeout-ms: 8000
+  # 机器人空闲多久后可被高优任务抢占（毫秒），0 表示任何时候都允许抢占
+  preempt-idle-threshold-ms: 0
+
+logging:
+  level:
+    com.agv: INFO

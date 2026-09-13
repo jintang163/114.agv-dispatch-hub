@@ -1,0 +1,107 @@
+name: agv-fleet
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agv_fleet}
+      POSTGRES_USER: ${POSTGRES_USER:-agv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agv123}
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agv} -d ${POSTGRES_DB:-agv_fleet}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: agv-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  emqx:
+    image: emqx/emqx:5.8.3
+    container_name: agv-emqx
+    restart: unless-stopped
+    environment:
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_USER:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_PASSWORD:-public}
+      EMQX_NODE__COOKIE: agvfleetcookie
+    ports:
+      - "1883:1883"     # MQTT TCP
+      - "8083:8083"     # MQTT over WebSocket
+      - "18083:18083"   # EMQX Dashboard
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 8s
+      timeout: 5s
+      retries: 25
+
+  backend:
+    build: ./backend
+    container_name: agv-backend
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-agv_fleet}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-agv}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-agv123}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      MQTT_BROKER: tcp://emqx:1883
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+  emulator:
+    build: ./emulator
+    container_name: agv-emulator
+    restart: unless-stopped
+    environment:
+      BROKER: tcp://emqx:1883
+      MAP_URL: http://backend:8080/api/map
+      ROBOT_COUNT: "6"
+      TICK_SECONDS: "1.0"
+      FAULT_RATE: "0"
+      TZ: Asia/Shanghai
+    depends_on:
+      emqx:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    container_name: agv-frontend
+    restart: unless-stopped
+    ports:
+      - "8088:80"
+    depends_on:
+      - backend
+      - emqx
+
+volumes:
+  pgdata:
+  redisdata:

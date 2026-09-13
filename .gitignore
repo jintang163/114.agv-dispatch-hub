@@ -1,41 +1,24 @@
-# Java
-*.class
-*.jar
-*.war
-*.ear
+HELP.md
 target/
 !.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
 
-# IDE
+### IntelliJ IDEA ###
 .idea/
+*.iws
 *.iml
+*.ipr
 .vscode/
-*.swp
-*.swo
 
-# Node
+### Node ###
 node_modules/
 dist/
-.npm
-.eslintcache
 
-# Logs
-*.log
-logs/
+### Python ###
+__pycache__/
+*.pyc
+.venv/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# MinIO
-minio-data/
-
-# Docker
-*.pid
-*.seed
-
-# Trae
-.trae/
-
-# WeChat Mini Program
-miniprogram_npm/
+### Env ###
+.env
