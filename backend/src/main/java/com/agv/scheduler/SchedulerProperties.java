@@ -20,4 +20,14 @@ public class SchedulerProperties {
     private int pickupDwellSeconds = 4;
     /** 卸货停靠时长（秒） */
     private int dropDwellSeconds = 4;
+    /** 低电量告警阈值（%）：空闲车低于该值自动回充 */
+    private int lowBatteryThreshold = 25;
+    /** 严重低电量阈值（%）：执行中车辆低于该值告警，完成当前任务后立即回充 */
+    private int criticalBatteryThreshold = 15;
+    /** 充满判定目标电量（%），达到后结束充电任务恢复空闲 */
+    private int chargeTargetBattery = 95;
+    /** 在桩充电停靠时长（秒），模拟器在该时长内涨电至目标值 */
+    private int chargeDwellSeconds = 30;
+    /** 电量巡检周期（毫秒） */
+    private long batterySweepMs = 2000;
 }

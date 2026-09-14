@@ -170,6 +170,7 @@ tr:hover td { background: #fafaf7; }
 
 .tag.IDLE    { background: #e6f5e6; color: #0c6b0c; }
 .tag.BUSY    { background: #e8f1fc; color: #1c5cab; }
+.tag.CHARGING{ background: #fdf3dc; color: #9a6400; }
 .tag.FAULT   { background: #fdebe9; color: #b02a2a; }
 .tag.OFFLINE { background: #eceae4; color: #6b6758; }
 

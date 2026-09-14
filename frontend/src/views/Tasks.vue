@@ -119,6 +119,9 @@
               </option>
             </select>
           </label>
+          <label class="field">货物重量 kg（可空，校验 AGV 载重）
+            <input type="number" min="0" v-model.number="form.payloadWeight" placeholder="如 300">
+          </label>
           <label class="field full">期望完成时间（可空，本地时区）
             <input type="datetime-local" v-model="form.deadlineLocal">
           </label>
@@ -181,7 +184,7 @@ const detail = ref(null)
 const pickNodes = ref([])
 const dropNodes = ref([])
 
-const form = ref({ type: 'TRANSPORT', priority: 'MEDIUM', fromNode: '', toNode: '', deadlineLocal: '', remark: '' })
+const form = ref({ type: 'TRANSPORT', priority: 'MEDIUM', fromNode: '', toNode: '', deadlineLocal: '', payloadWeight: null, remark: '' })
 
 let timer = null
 
@@ -227,6 +230,7 @@ async function submit() {
   try {
     const body = { ...form.value }
     delete body.deadlineLocal
+    if (body.payloadWeight === '' || body.payloadWeight == null) body.payloadWeight = null
     body.deadline = form.value.deadlineLocal
       ? new Date(form.value.deadlineLocal).toISOString()
       : null
@@ -287,7 +291,8 @@ const EVENT_TEXT = {
   PICKED_UP: '完成取货', GOING_DELIVERY: '前往卸货点', AT_DELIVERY: '到达卸货点',
   DROPPED: '完成卸货', COMPLETED: '任务完成', CANCELLED: '任务取消',
   EXCEPTION: '发生异常', REASSIGNED: '重新分配', PREEMPTED: '被高优任务抢占',
-  REPRIORITIZED: '优先级调整', REROUTED: '路径重规划'
+  REPRIORITIZED: '优先级调整', REROUTED: '路径重规划',
+  GOING_CHARGER: '前往充电桩', CHARGING: '开始充电', CHARGING_STARTED: '接入充电桩'
 }
 </script>
 

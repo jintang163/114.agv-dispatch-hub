@@ -6,6 +6,7 @@ import com.agv.domain.entity.TaskEvent;
 import com.agv.domain.enums.RobotStatus;
 import com.agv.domain.enums.TaskPhase;
 import com.agv.domain.enums.TaskStatus;
+import com.agv.domain.enums.TaskType;
 import com.agv.infra.mqtt.FleetBroadcaster;
 import com.agv.infra.mqtt.MqttGateway;
 import com.agv.infra.mqtt.Topics;
@@ -50,11 +51,15 @@ public class DispatchEngine {
     private final SchedulerProperties props;
     private final MqttGateway mqtt;
     private final FleetBroadcaster broadcaster;
+    private final ChargingService charging;
     private final ObjectMapper om;
     private final ReentrantLock lock = new ReentrantLock();
 
     /** 等待重新规划的任务（机器人遇阻停在节点，tick 中重试） */
     private final Map<String, Long> pendingReplans = new HashMap<>();
+
+    /** 严重低电标记：当前任务送达后立即回充（code -> 应回充的目标电量阈值判定结果） */
+    private final Set<String> needChargeAfterTask = new HashSet<>();
 
     public DispatchEngine(com.agv.domain.repository.TaskRepository taskRepository,
                           com.agv.domain.repository.RobotRepository robotRepository,
@@ -69,6 +74,7 @@ public class DispatchEngine {
                           SchedulerProperties props,
                           MqttGateway mqtt,
                           FleetBroadcaster broadcaster,
+                          ChargingService charging,
                           ObjectMapper om) {
         this.taskRepository = taskRepository;
         this.robotRepository = robotRepository;
@@ -83,6 +89,7 @@ public class DispatchEngine {
         this.props = props;
         this.mqtt = mqtt;
         this.broadcaster = broadcaster;
+        this.charging = charging;
         this.om = om;
     }
 
@@ -107,7 +114,24 @@ public class DispatchEngine {
                     queue.remove(taskId);
                     continue;
                 }
-                dispatchOne(task, null);
+                // 充电任务为系统为指定车辆生成，只允许派给该车（vehicle-directed）
+                String forceRobotCode = null;
+                if (task.getType() == TaskType.CHARGING && task.getRobotId() != null) {
+                    Robot bound = robotRepository.findById(task.getRobotId()).orElse(null);
+                    if (bound == null) {
+                        // 车辆已注销：取消悬空充电任务，释放充电桩占用
+                        queue.remove(taskId);
+                        task.setStatus(TaskStatus.CANCELLED);
+                        task.setRemark("车辆已注销，充电任务自动取消");
+                        taskRepository.save(task);
+                        continue;
+                    }
+                    if (bound.getStatus() == RobotStatus.OFFLINE || bound.getStatus() == RobotStatus.FAULT) {
+                        continue; // 等待该车恢复（故障时 handleFault 会清理，恢复后由巡检重新生成）
+                    }
+                    forceRobotCode = bound.getCode();
+                }
+                dispatchOne(task, forceRobotCode);
             }
         } catch (Exception e) {
             log.error("dispatch tick error", e);
@@ -141,23 +165,104 @@ public class DispatchEngine {
         }
     }
 
+    /**
+     * 电量巡检（与调度 tick 同锁串行）：
+     *  - IDLE 且低电：自动生成充电任务回桩（A* 选最近空闲桩），不派普通任务；
+     *  - BUSY 且严重低电：仅告警，不打断在途任务，送达后立即回充；
+     *  - CHARGING 状态由充电任务自身管理，此处不重复触发。
+     */
+    @Transactional
+    @Scheduled(fixedDelayString = "${agv.battery-sweep-ms:2000}")
+    public void batterySweep() {
+        if (!lock.tryLock()) {
+            return;
+        }
+        try {
+            for (Robot r : robotRepository.findAllByOrderByCodeAsc()) {
+                if (r.getBattery() == null) {
+                    continue;
+                }
+                if (r.getStatus() == RobotStatus.IDLE) {
+                    if (charging.shouldAutoCharge(r) && !charging.hasActiveChargeTask(r)) {
+                        log.info("机器人 {} 电量 {}% 低于阈值 {}%，自动回充",
+                                r.getCode(), r.getBattery(), props.getLowBatteryThreshold());
+                        Task chargeTask = charging.requestCharge(r,
+                                "低电量自动回充（阈值 " + props.getLowBatteryThreshold() + "%）");
+                        if (chargeTask == null) {
+                            charging.notifyNoChargerThrottled(r);
+                        }
+                    }
+                } else if (r.getStatus() == RobotStatus.BUSY) {
+                    if (charging.isCritical(r)) {
+                        if (needChargeAfterTask.add(r.getCode())) {
+                            log.warn("机器人 {} 严重低电 {}%，完成当前任务后回充",
+                                    r.getCode(), r.getBattery());
+                            broadcaster.event("LOW_BATTERY", "WARN", r.getCode(), r.getCurrentTaskId(),
+                                    r.getCode() + " 严重低电 " + r.getBattery()
+                                            + "%，将在当前任务送达后自动回充");
+                        }
+                    } else if (r.getBattery() >= props.getLowBatteryThreshold()) {
+                        needChargeAfterTask.remove(r.getCode());
+                    }
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** 手动触发回充（机器人页"立即充电"），返回生成/已有的充电任务 */
+    @Transactional
+    public Task requestCharge(String code) {
+        lock.lock();
+        try {
+            Robot r = robotRepository.findByCode(code)
+                    .orElseThrow(() -> new com.agv.common.ApiException("机器人不存在: " + code));
+            if (r.getStatus() == RobotStatus.OFFLINE || r.getStatus() == RobotStatus.FAULT) {
+                throw new com.agv.common.ApiException("机器人 " + code + " 离线/故障，无法回充");
+            }
+            if (charging.hasActiveChargeTask(r)) {
+                throw new com.agv.common.ApiException("机器人 " + code + " 已有充电任务");
+            }
+            if (r.getStatus() == RobotStatus.CHARGING) {
+                throw new com.agv.common.ApiException("机器人 " + code + " 正在充电");
+            }
+            Task t = charging.requestCharge(r, "人工触发回充");
+            if (t == null) {
+                throw new com.agv.common.ApiException("暂无空闲/可达充电桩");
+            }
+            return t;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     // ==================== 派发 ====================
 
     @Transactional
     public void dispatchOne(Task task, String forceRobotCode) {
         RobotSelector.Candidate candidate = selector.select(task, forceRobotCode);
-        if (c == null) {
+        if (candidate == null) {
             return; // 无可用机器人，留在队列
         }
         Robot robot = candidate.robot();
+        boolean isCharging = task.getType() == TaskType.CHARGING;
 
         // 抢占接管点：车辆已在边的后半段，以前方节点为起点（模拟器先走完剩余半边）
         boolean preempt = candidate.preempt();
         RobotTelemetry rt = telemetry.get(robot.getCode());
         String physPos = positionOf(robot);
         String pos = preempt ? selector.preemptStart(robot) : physPos;
-        List<String> leg1 = planner.plan(pos, task.getFromNode());
-        List<String> leg2 = planner.plan(task.getFromNode(), task.getToNode());
+        // 充电任务从当前位置直达充电桩（fromNode 仅为创建时锚点，抢占后可能已移动）
+        List<String> leg1;
+        List<String> leg2;
+        if (isCharging) {
+            leg1 = planner.plan(pos, task.getToNode());
+            leg2 = List.of(task.getToNode());
+        } else {
+            leg1 = planner.plan(pos, task.getFromNode());
+            leg2 = planner.plan(task.getFromNode(), task.getToNode());
+        }
         if (leg1.isEmpty() || leg2.isEmpty()) {
             task.setStatus(TaskStatus.EXCEPTION);
             task.setRemark("无可达路径: " + pos + "->" + task.getFromNode() + "->" + task.getToNode());
@@ -181,16 +286,21 @@ public class DispatchEngine {
                     props.getStepSeconds() * (1.0 - rt.progress()))));
         }
 
+        // 充电任务：连接点不取货停靠，终点停靠时长 = 在桩充电时长
+        boolean pickupAtJoin = !isCharging;
+        int endDwell = isCharging ? props.getChargeDwellSeconds() : props.getDropDwellSeconds();
+
         List<ReservationStore.Window> windows = null;
         long chosenDelay = -1;
         for (int delay = 0; delay <= MAX_START_DELAY_SEC; delay += DELAY_STEP_SEC) {
             // 全程从 now 起预约：等待期间持续占用起点；抢占先走完剩余半边
             List<ReservationStore.Window> candidateWindows = timelineBuilder.build(
-                    leg1, leg2, now, delay, halfEdgeKey, halfEdgeSeconds, true);
+                    leg1, leg2, now, delay, halfEdgeKey, halfEdgeSeconds,
+                    pickupAtJoin, endDwell);
             // 抢占时新窗口必然覆盖被抢占任务的旧窗口，检查阶段先忽略二者，
             // 选定延迟后先释放旧任务，再原子写入新窗口
             List<Long> ignore = victimId == null
-                    ? List.of() : List.of(task.getId(), victimId);
+                    ? List.of(task.getId()) : List.of(task.getId(), victimId);
             if (reservations.freeWindowsIgnoringTasks(ignore, candidateWindows)) {
                 windows = candidateWindows;
                 chosenDelay = delay;
@@ -229,7 +339,7 @@ public class DispatchEngine {
         task.setStatus(TaskStatus.ASSIGNED);
         task.setRobotId(robot.getId());
         task.setAssignedAt(Instant.now());
-        task.setPhase(TaskPhase.GOING_PICKUP);
+        task.setPhase(isCharging ? TaskPhase.GOING_CHARGER : TaskPhase.GOING_PICKUP);
         task.setPlannedPath(fullPath);
         task.setActualPath(new ArrayList<>(List.of(physPos)));
         if (task.getRemark() == null) {
@@ -243,14 +353,18 @@ public class DispatchEngine {
         robot.setCurrentNode(physPos);
         robotRepository.save(robot);
 
+        String actionText = isCharging ? "前往充电桩" : "分配";
         recordEvent(task.getId(),
                 candidate.preempt() ? "PREEMPT_ASSIGN" : "ASSIGNED",
                 robot.getCode(),
-                (candidate.preempt() ? "抢占分配" : "分配") + "，延迟 " + chosenDelay + "s 发车，路径 " + fullPath);
-        broadcaster.event(candidate.preempt() ? "PREEMPT" : "ASSIGN",
+                (candidate.preempt() ? "抢占分配" : actionText)
+                        + "，延迟 " + chosenDelay + "s 发车，路径 " + fullPath);
+        broadcaster.event(candidate.preempt() ? "PREEMPT" : (isCharging ? "CHARGE_DISPATCH" : "ASSIGN"),
                 candidate.preempt() ? "WARN" : "INFO",
                 robot.getCode(), task.getId(),
-                (candidate.preempt() ? "抢占执行高优任务 #" : "开始执行任务 #") + task.getId());
+                isCharging
+                        ? robot.getCode() + " 前往充电桩 " + task.getToNode()
+                        : (candidate.preempt() ? "抢占执行高优任务 #" : "开始执行任务 #") + task.getId());
 
         // 模拟器走完剩余半边(halfEdgeSeconds)后再避让等待 chosenDelay
         publishTaskToRobot(robot.getCode(), task, fullPath,
@@ -268,6 +382,10 @@ public class DispatchEngine {
         payload.put("startDelay", startDelaySeconds);
         payload.put("pickupDwell", props.getPickupDwellSeconds());
         payload.put("dropDwell", props.getDropDwellSeconds());
+        if (task.getType() == TaskType.CHARGING) {
+            payload.put("chargeDwell", props.getChargeDwellSeconds());
+            payload.put("targetBattery", props.getChargeTargetBattery());
+        }
         payload.put("stepSeconds", props.getStepSeconds());
         if (preemptTaskId != null) {
             payload.put("preempt", true);
@@ -295,6 +413,8 @@ public class DispatchEngine {
                 case "NODE_ARRIVED" -> appendActualNode(robot, taskId, str(data.get("node")));
                 case "PICKED_UP" -> updatePhase(robot, taskId, TaskPhase.GOING_DELIVERY, "已取货");
                 case "DROPPED" -> updatePhase(robot, taskId, TaskPhase.AT_DELIVERY, "已卸货");
+                case "CHARGING_STARTED" -> updatePhase(robot, taskId, TaskPhase.CHARGING,
+                        "已接入充电桩，充电中");
                 case "TASK_COMPLETED" -> completeTask(robot, taskId);
                 case "TASK_FAILED" -> {
                     broadcaster.event("EXCEPTION", "ERROR", code, taskId,
@@ -366,13 +486,21 @@ public class DispatchEngine {
             releaseAndIdle(robot, taskId);
             return;
         }
+        boolean wasCharging = task.getType() == TaskType.CHARGING;
         reservations.releaseTask(taskId);
         task.setStatus(TaskStatus.COMPLETED);
         task.setPhase(TaskPhase.DONE);
         task.setCompletedAt(Instant.now());
         taskRepository.save(task);
-        recordEvent(taskId, "COMPLETED", robot.getCode(), "任务完成");
-        broadcaster.event("COMPLETED", "SUCCESS", robot.getCode(), taskId, "任务完成");
+        recordEvent(taskId, "COMPLETED", robot.getCode(),
+                wasCharging ? "充电完成，电量 " + robot.getBattery() + "%" : "任务完成");
+        if (wasCharging) {
+            broadcaster.event("CHARGE_COMPLETE", "SUCCESS", robot.getCode(), taskId,
+                    robot.getCode() + " 充电完成，电量恢复至 " + robot.getBattery() + "%");
+        } else {
+            broadcaster.event("COMPLETED", "SUCCESS", robot.getCode(), taskId, "任务完成");
+        }
+        needChargeAfterTask.remove(robot.getCode());
         releaseAndIdle(robot, taskId);
     }
 
@@ -396,23 +524,46 @@ public class DispatchEngine {
             Task task = taskRepository.findById(taskId).orElse(null);
             if (task != null && task.getStatus() != TaskStatus.COMPLETED
                     && task.getStatus() != TaskStatus.CANCELLED) {
-                reservations.releaseTask(taskId);
-                task.setStatus(TaskStatus.EXCEPTION);
-                task.setRemark("AGV 故障: " + reason);
-                taskRepository.save(task);
-                recordEvent(taskId, "EXCEPTION", robot.getCode(), "AGV 故障: " + reason);
+                // 充电任务不可转派给其他车辆：故障即取消，恢复后由电量巡检重新生成
+                if (task.getType() == TaskType.CHARGING) {
+                    reservations.releaseTask(taskId);
+                    queue.remove(taskId);
+                    task.setStatus(TaskStatus.CANCELLED);
+                    task.setRemark("AGV 故障，充电任务取消: " + reason);
+                    taskRepository.save(task);
+                    recordEvent(taskId, "CANCELLED", robot.getCode(), "AGV 故障，充电任务取消");
+                    broadcaster.event("CANCELLED", "WARN", robot.getCode(), taskId, "故障导致充电任务取消");
+                } else {
+                    reservations.releaseTask(taskId);
+                    task.setStatus(TaskStatus.EXCEPTION);
+                    task.setRemark("AGV 故障: " + reason);
+                    taskRepository.save(task);
+                    recordEvent(taskId, "EXCEPTION", robot.getCode(), "AGV 故障: " + reason);
 
-                // 强制重分配：立即回到待分配队列，下一 tick 指派其他机器人
-                task.setStatus(TaskStatus.PENDING);
-                task.setRobotId(null);
-                task.setPhase(null);
-                task.setPlannedPath(List.of());
-                task.setRemark("原机器人 " + robot.getCode() + " 故障(" + reason + ")，等待重分配");
-                taskRepository.save(task);
-                queue.enqueue(task);
-                recordEvent(taskId, "REASSIGNED", robot.getCode(), "故障强制重分配，重回队列");
-                broadcaster.event("REASSIGN", "WARN", null, taskId,
-                        robot.getCode() + " 故障，任务重新分配");
+                    // 强制重分配：立即回到待分配队列，下一 tick 指派其他机器人
+                    task.setStatus(TaskStatus.PENDING);
+                    task.setRobotId(null);
+                    task.setPhase(null);
+                    task.setPlannedPath(List.of());
+                    task.setRemark("原机器人 " + robot.getCode() + " 故障(" + reason + ")，等待重分配");
+                    taskRepository.save(task);
+                    queue.enqueue(task);
+                    recordEvent(taskId, "REASSIGNED", robot.getCode(), "故障强制重分配，重回队列");
+                    broadcaster.event("REASSIGN", "WARN", null, taskId,
+                            robot.getCode() + " 故障，任务重新分配");
+                }
+            }
+        }
+
+        // 清理绑定该车但尚未派出（PENDING）的充电任务，避免悬空占用充电桩
+        for (Task pendingCharge : taskRepository.findByRobotIdAndStatusIn(
+                robot.getId(), List.of(TaskStatus.PENDING))) {
+            if (pendingCharge.getType() == TaskType.CHARGING
+                    && !Objects.equals(pendingCharge.getId(), taskId)) {
+                queue.remove(pendingCharge.getId());
+                pendingCharge.setStatus(TaskStatus.CANCELLED);
+                pendingCharge.setRemark("AGV 故障，待派充电任务取消: " + reason);
+                taskRepository.save(pendingCharge);
             }
         }
     }
@@ -469,6 +620,9 @@ public class DispatchEngine {
             if (task.getStatus() != TaskStatus.ASSIGNED && task.getStatus() != TaskStatus.EXECUTING
                     && task.getStatus() != TaskStatus.EXCEPTION) {
                 throw new com.agv.common.ApiException("仅已分配/执行中/异常状态的任务可强制重分配");
+            }
+            if (task.getType() == TaskType.CHARGING) {
+                throw new com.agv.common.ApiException("充电任务绑定专属车辆，不支持强制重分配（可取消后重新触发回充）");
             }
             Long oldRobotId = task.getRobotId();
             reservations.releaseTask(taskId);
@@ -555,18 +709,32 @@ public class DispatchEngine {
         if (pos == null) return false;
 
         boolean loaded = t != null && t.loaded();
-        List<String> leg1 = loaded ? List.of(pos) : planner.plan(pos, task.getFromNode());
-        List<String> leg2 = planner.plan(loaded ? pos : task.getFromNode(), task.getToNode());
+        boolean isCharging = task.getType() == TaskType.CHARGING;
+        List<String> leg1;
+        List<String> leg2;
+        if (isCharging) {
+            // 充电任务无取货语义：从当前位置直接到充电桩
+            leg1 = planner.plan(pos, task.getToNode());
+            leg2 = List.of(task.getToNode());
+        } else if (loaded) {
+            leg1 = List.of(pos);
+            leg2 = planner.plan(pos, task.getToNode());
+        } else {
+            leg1 = planner.plan(pos, task.getFromNode());
+            leg2 = planner.plan(task.getFromNode(), task.getToNode());
+        }
         if (leg1.isEmpty() || leg2.isEmpty()) {
             return false; // 绕行路径暂不可得，机器人原地等待，下个 tick 再试
         }
+        int endDwell = isCharging ? props.getChargeDwellSeconds() : props.getDropDwellSeconds();
         long now = Instant.now().getEpochSecond();
         int chosenDelay = -1;
         List<ReservationStore.Window> chosen = null;
         for (int delay = 0; delay <= MAX_START_DELAY_SEC; delay += DELAY_STEP_SEC) {
             // 等待期间持续预约当前节点（robot 停在 pos），delay 后再发车
             List<ReservationStore.Window> windows =
-                    timelineBuilder.build(leg1, leg2, now, delay, null, 0, !loaded);
+                    timelineBuilder.build(leg1, leg2, now, delay, null, 0,
+                            !loaded && !isCharging, endDwell);
             // 先忽略自身旧窗口检查，避免过早释放导致别人抢入
             if (reservations.freeWindowsIgnoringTasks(List.of(task.getId()), windows)) {
                 chosen = windows;
@@ -632,6 +800,7 @@ public class DispatchEngine {
                         }
                     }
                     case "BUSY" -> robot.setStatus(RobotStatus.BUSY);
+                    case "CHARGING" -> robot.setStatus(RobotStatus.CHARGING);
                     case "OFFLINE" -> {
                         robot.setStatus(RobotStatus.OFFLINE);
                         telemetry.remove(code);
@@ -649,13 +818,18 @@ public class DispatchEngine {
             robotRepository.save(robot);
 
             if (!offline) {
+                String nextNode = str(data.get("nextNode"));
+                double[] sh = resolveSpeedHeading(node, nextNode,
+                        doubleVal(data.get("progress")), str(data.get("phase")), data);
                 telemetry.update(code, new RobotTelemetry(
                         node,
-                        str(data.get("nextNode")),
+                        nextNode,
                         doubleVal(data.get("progress")),
                         str(data.get("phase")),
                         Boolean.TRUE.equals(data.get("loaded")),
                         (int) Math.round(doubleVal(data.get("pathIndex"))),
+                        sh[0],
+                        sh[1],
                         now));
             }
         } finally {
@@ -688,6 +862,39 @@ public class DispatchEngine {
             return t.node();
         }
         return robot.getCurrentNode();
+    }
+
+    /**
+     * 解析速度与航向：优先采用 AGV 自报值，否则由拓扑坐标与边耗时估算。
+     * 速度单位为地图单位/秒；航向 0=东、90=南、±180=西（屏幕坐标 y 向下）。
+     * @return [speed, headingDegrees]
+     */
+    private double[] resolveSpeedHeading(String node, String nextNode, double progress,
+                                         String phase, Map<String, Object> data) {
+        double speed = 0;
+        double heading = 0;
+        if (data.get("speed") != null) {
+            speed = Math.max(0, doubleVal(data.get("speed")));
+        }
+        if (data.get("heading") != null) {
+            heading = doubleVal(data.get("heading"));
+        } else if (nextNode != null && node != null) {
+            var a = topology.node(node).orElse(null);
+            var b = topology.node(nextNode).orElse(null);
+            if (a != null && b != null) {
+                heading = Math.toDegrees(Math.atan2(
+                        b.getY() - a.getY(), b.getX() - a.getX()));
+                if (data.get("speed") == null && progress > 0) {
+                    double len = Math.hypot(b.getX() - a.getX(), b.getY() - a.getY());
+                    speed = len / Math.max(1, props.getStepSeconds());
+                }
+            }
+        }
+        if ("CHARGING".equals(phase) || "AT_PICKUP".equals(phase)
+                || "AT_DELIVERY".equals(phase) || nextNode == null) {
+            speed = 0;
+        }
+        return new double[]{speed, heading};
     }
 
     private String toJson(Object o) {

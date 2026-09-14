@@ -14,7 +14,6 @@ import org.springframework.integration.mqtt.core.DefaultMqttPahoClientFactory;
 import org.springframework.integration.mqtt.core.MqttPahoClientFactory;
 import org.springframework.integration.mqtt.inbound.MqttPahoMessageDrivenChannelAdapter;
 import org.springframework.integration.mqtt.outbound.MqttPahoMessageHandler;
-import org.springframework.integration.mqtt.support.DefaultPahoMessageConverter;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageHandler;
 
@@ -57,10 +56,7 @@ public class MqttConfig {
                 Topics.STATUS_WILDCARD, Topics.EVENT_WILDCARD);
         adapter.setCompletionTimeout(5000);
         adapter.setQos(props.getQos());
-        adapter.setRecoveryInterval(2000);
-        DefaultPahoMessageConverter converter = new DefaultPahoMessageConverter();
-        converter.setPayloadType(String.class);
-        adapter.setConverter(converter);
+        // Spring Integration 6.x 默认按字符集把负载转为 String，入站路由直接 String.valueOf 兜底
         adapter.setOutputChannel(channel);
         return adapter;
     }

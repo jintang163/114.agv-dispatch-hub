@@ -1,6 +1,6 @@
 # AGV 机器人任务调度中心（仓储多车调度）
 
-从 0 到 1 实现的仓储 AGV 车队调度系统：接收 WMS 下发的搬运/拣选任务，按 **紧急度 + 截止时间** 排队派车，用 **A\* 寻路 + 时间窗预约** 消解多车路径冲突（路口碰撞 / 边对向冲突 / 追尾），支持 **高优先级任务安全抢占**、**故障/阻塞强制重分配**，并通过 MQTT 实时回传车队状态、Vue3 + ECharts 可视化。
+从 0 到 1 实现的仓储 AGV 车队调度系统：接收 WMS 下发的搬运/拣选任务，按 **紧急度 + 截止时间** 排队派车，用 **A\* 寻路 + 时间窗预约** 消解多车路径冲突（路口碰撞 / 边对向冲突 / 追尾），支持 **高优先级任务安全抢占**、**故障/阻塞强制重分配**，并内置 **AGV 状态管理模块**（实时位置/速度/方向/电量/运行状态、车辆注册与车型载重维护、低电告警与自动回充），通过 MQTT 实时回传车队状态、Vue3 + ECharts 可视化。
 
 ## 技术栈
 
@@ -28,7 +28,7 @@ docker compose up -d --build
 | PostgreSQL | localhost:5432 | agv / agv123 |
 | Redis | localhost:6379 | |
 
-启动后自动播种 **9×5 网格仓库**（6 个取货点 P-01~P-06、3 个卸货点 D-01~D-03、45 个路口）与 **6 台 AGV**；模拟器容器启动后 AGV 上线变为空闲。
+启动后自动播种 **9×5 网格仓库**（6 个取货点 P-01~P-06、3 个卸货点 D-01~D-03、3 个充电桩 C-01~C-03、45 个路口）与 **6 台 AGV**（含型号/载重/归属充电桩，初始电量刻意分散以便演示自动回充）；模拟器容器启动后 AGV 上线变为空闲。
 
 演示脚本（在宿主机执行，需 curl）：
 
@@ -91,6 +91,26 @@ bash demo/wms-demo.sh          # 下发普通任务 + 1 个高优急单，观察
 - 故障车任务：`EXCEPTION` 记录后立即回到 `PENDING` 强制重分配，时间窗释放，下一 tick 派给其他车；
 - 支持人工注入故障/恢复（机器人页或 REST）。
 
+### AGV 状态管理与自动回充
+
+**实时状态**：每台 AGV 的运行状态为 `空闲 IDLE / 执行 BUSY / 充电 CHARGING / 故障 FAULT / 离线 OFFLINE`；`fleet/state` 快照包含站点（node/nextNode/progress）、地图坐标（边上插值 x/y）、**速度**、**航向角**（0=东，由拓扑推算或车端自报）、电量、载货、当前任务与阶段。
+
+**注册与维护**：每台车维护 编号 code、型号 model、额定载重 payloadCapacity、允许任务类型 allowedTaskTypes（空=全部；派车时按类型与货物重量过滤）、归属充电桩 homeCharger。支持 REST 注册 / 更新 / 注销（仅离线无在途任务）。
+
+**电量管理**（阈值可在 application.yml 调整）：
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `agv.low-battery-threshold` | 25% | 空闲车低于该值自动生成充电任务回桩 |
+| `agv.critical-battery-threshold` | 15% | 执行中车辆告警，不打断在途任务，送达后立即回充 |
+| `agv.charge-target-battery` | 95% | 充至该电量结束充电任务，恢复空闲可派单 |
+| `agv.charge-dwell-seconds` | 30s | 在桩充电停靠时长（也是充电桩预约占用时长） |
+
+- 空闲低电车：电量巡检（2s）幂等生成 **CHARGING 任务**，归属桩优先、否则 A\* 就近选**未被占用**的充电桩，走统一队列派车与时间窗预约（一台桩同时只服务一台车）；
+- 执行中严重低电：只发告警，**载货任务必须先送达**，完成时自动补一个回充任务；
+- 充电任务绑定专属车辆，不可转派；车辆故障则取消（恢复后由巡检重新生成）；
+- 机器人页可手动「回充」，并对低电/严重低电车行高亮；模拟器按行驶放电、在桩涨电，充满自动结束。
+
 ## 任务状态机
 
 ```
@@ -106,10 +126,10 @@ PENDING ──派车──► ASSIGNED ──TASK_STARTED──► EXECUTING ─
 
 | 主题 | 方向 | 说明 |
 |---|---|---|
-| `agv/{code}/task` | ↓ 调度→车 | 任务派发：taskId/path/from/to/dwell/startDelay/preempt |
+| `agv/{code}/task` | ↓ 调度→车 | 任务派发：taskId/type/path/from/to/dwell/startDelay/preempt；充电任务另含 chargeDwell/targetBattery |
 | `agv/{code}/cmd` | ↓ 调度→车 | CANCEL / PATH_UPDATE / FAULT / RESET |
-| `agv/{code}/status` | ↑ 车→调度 | retained，1s：status/node/nextNode/progress/phase/loaded/battery |
-| `agv/{code}/event` | ↑ 车→调度 | TASK_STARTED/NODE_ARRIVED/PICKED_UP/DROPPED/TASK_COMPLETED/PREEMPTED/FAULT/RECOVERED |
+| `agv/{code}/status` | ↑ 车→调度 | retained，1s：status(含 CHARGING)/node/nextNode/progress/phase/loaded/battery/speed/heading |
+| `agv/{code}/event` | ↑ 车→调度 | TASK_STARTED/NODE_ARRIVED/PICKED_UP/DROPPED/CHARGING_STARTED/TASK_COMPLETED/PREEMPTED/FAULT/RECOVERED |
 | `fleet/state` | 调度→前端 | retained，1s 全量车队快照 |
 | `fleet/events` | 调度→前端 | 调度事件流（派发/抢占/重分配/异常…） |
 
@@ -124,7 +144,10 @@ PENDING ──派车──► ASSIGNED ──TASK_STARTED──► EXECUTING ─
 | POST | `/api/tasks/{id}/cancel` | 取消 |
 | POST | `/api/tasks/{id}/reassign` | 强制重分配（body 可指定 robotCode） |
 | GET | `/api/tasks/queue/view` | 优先级队列快照与评分 |
-| GET | `/api/robots` · POST `/api/robots/{code}/fault` `/recover` | 机器人监控/演练 |
+| GET | `/api/robots` · GET `/api/robots/chargers` | 机器人监控 / 充电桩列表 |
+| POST | `/api/robots` · PUT `/api/robots/{code}` · DELETE `/api/robots/{code}` | AGV 注册 / 档案更新 / 注销（仅离线） |
+| POST | `/api/robots/{code}/charge` | 手动触发回充（自动生成充电任务） |
+| POST | `/api/robots/{code}/fault` `/recover` | 故障注入 / 恢复演练 |
 | GET | `/api/map` · PUT `/api/map/edges/block` | 拓扑查询 / 通道阻塞 |
 | GET | `/api/stats/overview` `/completion-trend` `/recent-events` | 看板统计 |
 
@@ -156,4 +179,4 @@ cd frontend && npm install && npm run dev    # http://localhost:5173
 
 - 时间窗为固定步长（2s/边，取/卸货 4s），真实部署可改为 AGV 自报预计到达时间（ETA）驱动预约；
 - 单调度实例够用；多实例可把 `ReentrantLock` 换为 Redis 分布式锁/分片；
-- 可继续扩展：充电任务与低电量自动回充、双向单行通道交通管制、WMS 对接鉴权与幂等（externalNo）。
+- 已支持充电任务与低电量自动回充；可继续扩展：双向单行通道交通管制、按车型/工位的任务类型路由、WMS 对接鉴权与幂等（externalNo）。

@@ -36,6 +36,17 @@ agv:
   heartbeat-timeout-ms: 8000
   # 机器人空闲多久后可被高优任务抢占（毫秒），0 表示任何时候都允许抢占
   preempt-idle-threshold-ms: 0
+  # ---- 电量管理 ----
+  # 低电量告警阈值（%）：空闲车低于该值自动生成充电任务回桩
+  low-battery-threshold: 25
+  # 严重低电量阈值（%）：执行中车辆低于该值告警（不打断在途任务），送达后立即回充
+  critical-battery-threshold: 15
+  # 充满判定（%）：达到该电量结束充电任务，恢复空闲可派单
+  charge-target-battery: 95
+  # 在桩充电停靠时长（秒）
+  charge-dwell-seconds: 30
+  # 电量巡检周期（毫秒）
+  battery-sweep-ms: 2000
 
 logging:
   level:

@@ -4,6 +4,8 @@ import com.agv.domain.entity.Robot;
 import com.agv.domain.entity.Task;
 import com.agv.domain.enums.RobotStatus;
 import com.agv.domain.enums.TaskPhase;
+import com.agv.domain.enums.TaskStatus;
+import com.agv.domain.enums.TaskType;
 import com.agv.domain.repository.RobotRepository;
 import com.agv.domain.repository.TaskRepository;
 import org.springframework.stereotype.Component;
@@ -52,6 +54,21 @@ public class RobotSelector {
 
         for (Robot robot : robotRepository.findAllByOrderByCodeAsc()) {
             if (forceRobotCode != null && !forceRobotCode.equals(robot.getCode())) {
+                continue;
+            }
+            // 车型能力校验：允许任务类型 + 载重能力（充电任务对所有车型开放、无载重）
+            if (!robot.supports(task.getType())) {
+                continue;
+            }
+            if (task.getPayloadWeight() != null && robot.getPayloadCapacity() != null
+                    && task.getPayloadWeight() > robot.getPayloadCapacity()) {
+                continue;
+            }
+            // 普通任务不得占用"已绑定待派充电任务"的车辆（该预留给它自己的回充任务）
+            if (task.getType() != TaskType.CHARGING
+                    && robot.getId() != null
+                    && taskRepository.existsByTypeAndRobotIdAndStatusIn(
+                            TaskType.CHARGING, robot.getId(), List.of(TaskStatus.PENDING))) {
                 continue;
             }
             if (robot.getLastHeartbeat() == null

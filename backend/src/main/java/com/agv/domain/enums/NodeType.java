@@ -5,7 +5,8 @@ public enum NodeType {
     JUNCTION("路口"),
     PICK("取货点"),
     STORAGE("货架位"),
-    DROP("卸货点");
+    DROP("卸货点"),
+    CHARGER("充电桩");
 
     private final String label;
 

@@ -21,7 +21,7 @@ public class TopologyCache {
     private final MapEdgeRepository edgeRepository;
 
     @Getter
-    private volatile Map<String, MapNode> nodes = Map.of());
+    private volatile Map<String, MapNode> nodes = Map.of();
 
     /** code -> (neighbor -> weight) */
     private volatile Map<String, Map<String, Integer>> adjacency = Map.of();
@@ -38,7 +38,7 @@ public class TopologyCache {
             n.put(node.getCode(), node);
         }
         Map<String, Map<String, Integer>> adj = new HashMap<>();
-        for (MapNode node : n.keySet()) {
+        for (String node : n.keySet()) {
             adj.put(node, new HashMap<>());
         }
         for (MapEdge edge : edgeRepository.findAll()) {

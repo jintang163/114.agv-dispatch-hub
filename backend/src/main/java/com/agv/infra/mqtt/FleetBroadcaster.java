@@ -7,6 +7,7 @@ import com.agv.domain.repository.RobotRepository;
 import com.agv.domain.repository.TaskRepository;
 import com.agv.scheduler.RobotTelemetry;
 import com.agv.scheduler.TelemetryStore;
+import com.agv.scheduler.TopologyCache;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -27,18 +28,41 @@ public class FleetBroadcaster {
     private final RobotRepository robotRepository;
     private final TaskRepository taskRepository;
     private final TelemetryStore telemetry;
+    private final TopologyCache topology;
     private final ObjectMapper om;
 
     public FleetBroadcaster(MqttGateway mqtt,
                             RobotRepository robotRepository,
                             TaskRepository taskRepository,
                             TelemetryStore telemetry,
+                            TopologyCache topology,
                             ObjectMapper om) {
         this.mqtt = mqtt;
         this.robotRepository = robotRepository;
         this.taskRepository = taskRepository;
         this.telemetry = telemetry;
+        this.topology = topology;
         this.om = om;
+    }
+
+    /** node→nextNode 边上按 progress 线性插值得到地图坐标；静止（无 nextNode）返回节点坐标 */
+    private double[] interpolate(String node, String nextNode, double progress) {
+        var a = node == null ? null : topology.node(node).orElse(null);
+        if (a == null) {
+            return null;
+        }
+        if (nextNode == null || progress <= 0) {
+            return new double[]{a.getX(), a.getY()};
+        }
+        var b = topology.node(nextNode).orElse(null);
+        if (b == null) {
+            return new double[]{a.getX(), a.getY()};
+        }
+        double p = Math.min(1, Math.max(0, progress));
+        return new double[]{
+                a.getX() + (b.getX() - a.getX()) * p,
+                a.getY() + (b.getY() - a.getY()) * p
+        };
     }
 
     @Scheduled(fixedDelay = 1000, initialDelay = 1500)
@@ -50,6 +74,10 @@ public class FleetBroadcaster {
                 Map<String, Object> v = new LinkedHashMap<>();
                 v.put("code", r.getCode());
                 v.put("name", r.getName());
+                v.put("model", r.getModel());
+                v.put("payloadCapacity", r.getPayloadCapacity());
+                v.put("allowedTaskTypes", r.getAllowedTaskTypes());
+                v.put("homeCharger", r.getHomeCharger());
                 v.put("status", r.getStatus().name());
                 v.put("node", r.getCurrentNode());
                 v.put("battery", r.getBattery());
@@ -60,6 +88,13 @@ public class FleetBroadcaster {
                     v.put("progress", t.progress());
                     v.put("phase", t.phase());
                     v.put("loaded", t.loaded());
+                    v.put("speed", Math.round(t.speed() * 10) / 10.0);
+                    v.put("heading", Math.round(t.heading()));
+                    double[] xy = interpolate(r.getCurrentNode(), t.nextNode(), t.progress());
+                    if (xy != null) {
+                        v.put("x", Math.round(xy[0]));
+                        v.put("y", Math.round(xy[1]));
+                    }
                 }
                 robotViews.add(v);
             }

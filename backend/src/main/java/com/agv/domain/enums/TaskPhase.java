@@ -10,6 +10,10 @@ public enum TaskPhase {
     GOING_DELIVERY,
     /** 到达终点，正在卸货 */
     AT_DELIVERY,
+    /** 前往充电桩途中（自动充电任务） */
+    GOING_CHARGER,
+    /** 已到桩，正在充电 */
+    CHARGING,
     /** 完成 */
     DONE
 }

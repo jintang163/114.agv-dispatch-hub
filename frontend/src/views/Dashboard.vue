@@ -22,7 +22,7 @@
       <div class="card kpi">
         <div class="label">可用 AGV</div>
         <div class="value">{{ idleRobots }} <span class="muted" style="font-size:15px">/ {{ realtime.robots.length }}</span></div>
-        <div class="hint">忙碌 {{ busyRobots }} · 故障 {{ faultRobots }}</div>
+        <div class="hint">忙碌 {{ busyRobots }} · 充电 {{ chargingRobots }} · 故障 {{ faultRobots }}</div>
       </div>
       <div class="card kpi">
         <div class="label">异常任务</div>
@@ -114,6 +114,7 @@ onBeforeUnmount(() => clearInterval(timer))
 const tasksByStatus = computed(() => stats.value.tasksByStatus || {})
 const idleRobots = computed(() => realtime.robots.filter(r => r.status === 'IDLE').length)
 const busyRobots = computed(() => realtime.robots.filter(r => r.status === 'BUSY').length)
+const chargingRobots = computed(() => realtime.robots.filter(r => r.status === 'CHARGING').length)
 const faultRobots = computed(() => realtime.robots.filter(r => r.status === 'FAULT').length)
 
 const STATUS_COLOR = {
@@ -191,7 +192,9 @@ const EVENT_TEXT = {
   REPRIORITIZED: '优先级调整', COMPLETED: '任务完成', CANCELLED: '任务取消',
   REASSIGN: '强制重分配', REASSIGNED: '重新入队', REROUTE: '受阻请求改道',
   REROUTED: '路径重规划', EXCEPTION: '任务异常',
-  FAULT: 'AGV 故障', RECOVERED: 'AGV 恢复'
+  FAULT: 'AGV 故障', RECOVERED: 'AGV 恢复',
+  LOW_BATTERY: '低电量告警', CHARGE_START: '前往充电',
+  CHARGE_DISPATCH: '充电派发', CHARGE_COMPLETE: '充电完成'
 }
 function eventText(t) {
   return EVENT_TEXT[t] || t

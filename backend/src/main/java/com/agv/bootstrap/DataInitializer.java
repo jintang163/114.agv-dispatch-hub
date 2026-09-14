@@ -41,6 +41,8 @@ public class DataInitializer implements CommandLineRunner {
     private static final int ROWS = 5;
     private static final int[] PICK_COLS = {1, 2, 3, 5, 6, 7};
     private static final int[] DROP_COLS = {0, 4, 8};
+    /** 充电桩：西侧外延，分别接在 0/2/4 行最左路口 */
+    private static final int[] CHARGER_ROWS = {0, 2, 4};
 
     private final MapNodeRepository nodeRepository;
     private final MapEdgeRepository edgeRepository;
@@ -56,6 +58,9 @@ public class DataInitializer implements CommandLineRunner {
         boolean emptyMap = nodeRepository.count() == 0;
         if (emptyMap) {
             seedMap();
+        } else {
+            // 升级场景：为既有地图幂等补播种充电桩
+            seedChargersIfMissing();
         }
         topologyCache.refresh();
 
@@ -94,6 +99,8 @@ public class DataInitializer implements CommandLineRunner {
             saveNode(code, 120 + c * 100, 670, NodeType.DROP, "卸货点 " + (i + 1));
             saveEdge(junction(ROWS - 1, c), code);
         }
+        // 充电桩（西侧伸出边）
+        seedChargers();
         // 网格横向边
         for (int r = 0; r < ROWS; r++) {
             for (int c = 0; c < COLS - 1; c++) {
@@ -108,16 +115,43 @@ public class DataInitializer implements CommandLineRunner {
         }
     }
 
+    private void seedChargersIfMissing() {
+        if (nodeRepository.findByType(NodeType.CHARGER).isEmpty()) {
+            seedChargers();
+        }
+    }
+
+    private void seedChargers() {
+        for (int i = 0; i < CHARGER_ROWS.length; i++) {
+            int r = CHARGER_ROWS[i];
+            String code = String.format("C-%02d", i + 1);
+            if (nodeRepository.findByCode(code).isEmpty()) {
+                saveNode(code, 45, 150 + r * 100, NodeType.CHARGER, "充电桩 " + (i + 1));
+            }
+            saveEdge(junction(r, 0), code);
+        }
+    }
+
     private void seedRobots() {
         String[] anchors = {junction(4, 0), junction(4, 2), junction(4, 4),
                 junction(4, 6), junction(4, 8), junction(2, 8)};
+        // 型号 / 载重 / 初始电量（刻意分散以便演示低电自动回充）
+        String[] models = {"FL-500", "FL-500", "FL-1000", "FL-500", "FL-1000", "FL-500"};
+        int[] capacities = {500, 500, 1000, 500, 1000, 500};
+        int[] batteries = {98, 30, 20, 88, 45, 12};
+        String[] homeChargers = {"C-03", "C-02", "C-02", "C-03", "C-02", "C-01"};
         for (int i = 0; i < anchors.length; i++) {
             Robot robot = new Robot();
             robot.setCode(String.format("AGV-%02d", i + 1));
             robot.setName("叉车机器人 " + (i + 1) + "号");
+            robot.setModel(models[i]);
+            robot.setPayloadCapacity(capacities[i]);
+            // 空列表 = 全部任务类型允许（CHARGING 始终隐式允许）
+            robot.setAllowedTaskTypes(new java.util.ArrayList<>());
+            robot.setHomeCharger(homeChargers[i]);
             robot.setStatus(RobotStatus.OFFLINE);
             robot.setCurrentNode(anchors[i]);
-            robot.setBattery(90 + i);
+            robot.setBattery(batteries[i]);
             robot.setLastHeartbeat(Instant.EPOCH);
             robotRepository.save(robot);
         }

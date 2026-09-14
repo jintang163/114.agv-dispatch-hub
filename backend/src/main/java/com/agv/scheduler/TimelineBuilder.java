@@ -31,18 +31,19 @@ public class TimelineBuilder {
     }
 
     public List<Window> build(List<String> leg1, List<String> leg2, long startEpoch) {
-        return build(leg1, leg2, startEpoch, 0, null, 0, true);
+        return build(leg1, leg2, startEpoch, 0, null, 0, true, props.getDropDwellSeconds());
     }
 
     /**
      * @param waitSeconds      发车前在序列首节点原地等待秒数
      * @param halfEdgeKey      抢占剩余半边的规范化边 key（无则 null）
      * @param halfEdgeSeconds  走完剩余半边所需秒数
-     * @param pickupAtJoin     连接点（leg1 末节点）是否为取货点；载货后重规划传 false
+     * @param pickupAtJoin     连接点（leg1 末节点）是否为取货点；载货后重规划/充电任务传 false
+     * @param endDwellSeconds  终点停靠秒数（卸货 dropDwell；充电任务传 chargeDwell）
      */
     public List<Window> build(List<String> leg1, List<String> leg2, long startEpoch,
                               long waitSeconds, String halfEdgeKey, long halfEdgeSeconds,
-                              boolean pickupAtJoin) {
+                              boolean pickupAtJoin, int endDwellSeconds) {
         if (leg1.isEmpty() || leg2.isEmpty()) {
             return List.of();
         }
@@ -57,7 +58,7 @@ public class TimelineBuilder {
 
         int step = props.getStepSeconds();
         int pickupDwell = props.getPickupDwellSeconds();
-        int dropDwell = props.getDropDwellSeconds();
+        int dropDwell = endDwellSeconds;
 
         List<Window> windows = new ArrayList<>();
         long t = startEpoch;
@@ -68,9 +69,12 @@ public class TimelineBuilder {
             t += halfEdgeSeconds;
         }
 
-        // 起点节点占用（含起步等待；起点即取货点时用取货停靠时长）
+        // 起点节点占用（含起步等待）；
+        // 单节点序列（如充电任务车已在桩）起点即终点，按终点停靠时长预约
+        boolean singleNode = endIdx == 0;
         boolean firstIsPickup = pickupAtJoin && joinIdx == 0;
-        long firstHold = (firstIsPickup ? pickupDwell : step) + waitSeconds;
+        long firstHold = (singleNode ? dropDwell
+                : (firstIsPickup ? pickupDwell : step)) + waitSeconds;
         windows.add(Window.node(seq.get(0), t, t + firstHold));
         t += firstHold;
 

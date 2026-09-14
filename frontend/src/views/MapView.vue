@@ -11,10 +11,13 @@
           <span><i style="background:#2a78d6"></i>取货点 P</span>
           <span><i style="background:#eb6834"></i>卸货点 D</span>
           <span><i style="background:#898781"></i>路口 J</span>
+          <span><i style="background:#eda100"></i>充电桩 C</span>
           <span><i style="background:#d03b3b"></i>高优任务路径</span>
           <span><i style="background:#2a78d6"></i>普通任务规划路径</span>
+          <span><i style="background:#eda100"></i>充电路径</span>
           <span><i style="background:#0ca30c"></i>实际已走轨迹</span>
           <span><i style="background:#d03b3b;border-radius:50%"></i>故障 AGV</span>
+          <span><i style="background:#eda100;border-radius:50%"></i>充电中 AGV</span>
           <span><i style="background:repeating-linear-gradient(45deg,#d03b3b,#d03b3b 4px,transparent 4px,transparent 8px)"></i>阻塞通道</span>
         </div>
         <span class="spacer"></span>
@@ -67,8 +70,15 @@ onMounted(() => {
 })
 onBeforeUnmount(() => clearInterval(timer))
 
-const NODE_COLOR = { JUNCTION: '#898781', PICK: '#2a78d6', DROP: '#eb6834', STORAGE: '#b7b2a5' }
+const NODE_COLOR = {
+  JUNCTION: '#898781', PICK: '#2a78d6', DROP: '#eb6834',
+  STORAGE: '#b7b2a5', CHARGER: '#eda100'
+}
 const PRI_PATH = { HIGH: '#d03b3b', MEDIUM: '#2a78d6', LOW: '#86b6ef' }
+function pathColor(t) {
+  if (t.type === 'CHARGING') return '#eda100'
+  return PRI_PATH[t.priority] || '#2a78d6'
+}
 
 function xy(code) {
   const n = nodeMap.value[code]
@@ -94,15 +104,16 @@ const option = computed(() => {
   for (const t of active) {
     const coords = t.plannedPath.map(xy).filter(Boolean)
     if (coords.length > 1) {
+      const charging = t.type === 'CHARGING'
       plannedLines.push({
         coords,
         lineStyle: {
-          color: PRI_PATH[t.priority] || '#2a78d6',
-          width: t.priority === 'HIGH' ? 3 : 2,
-          opacity: 0.45,
-          type: 'solid'
+          color: pathColor(t),
+          width: t.priority === 'HIGH' || charging ? 3 : 2,
+          opacity: charging ? 0.8 : 0.45,
+          type: charging ? [7, 4] : 'solid'
         },
-        meta: { kind: 'planned', taskId: t.id, priority: t.priority }
+        meta: { kind: 'planned', taskId: t.id, priority: t.priority, charging }
       })
     }
   }
@@ -134,18 +145,20 @@ const option = computed(() => {
     const pos = robotPos(r)
     if (!pos) return null
     const fault = r.status === 'FAULT'
+    const charging = r.status === 'CHARGING'
     return {
       value: pos,
       symbol: r.loaded ? 'diamond' : 'circle',
       symbolSize: r.loaded ? 18 : 15,
       itemStyle: {
-        color: fault ? '#d03b3b' : (r.status === 'BUSY' ? '#1c5cab' : '#0ca30c'),
+        color: fault ? '#d03b3b' : charging ? '#eda100'
+          : (r.status === 'BUSY' ? '#1c5cab' : '#0ca30c'),
         borderColor: '#fff', borderWidth: 2
       },
       label: {
         show: true,
         position: 'top',
-        formatter: `${r.code}${r.taskId ? ' #' + r.taskId : ''}`,
+        formatter: `${r.code}${r.taskId ? ' #' + r.taskId : ''}${charging ? ' ⚡' : ''}`,
         fontSize: 11, fontWeight: 600, color: '#0b0b0b'
       },
       meta: { kind: 'robot', robot: r }
@@ -155,6 +168,8 @@ const option = computed(() => {
   const nodeData = nodes.value.map(n => ({
     value: [n.x, n.y],
     symbolSize: n.type === 'JUNCTION' ? 11 : 17,
+    symbol: n.type === 'CHARGER' ? 'rect' : 'circle',
+    symbolRotate: n.type === 'CHARGER' ? 45 : 0,
     itemStyle: {
       color: NODE_COLOR[n.type] || '#898781',
       borderColor: '#fff', borderWidth: 2
@@ -192,10 +207,15 @@ const option = computed(() => {
         }
         if (m.kind === 'robot') {
           const r = m.robot
-          return `<b>${r.code}</b> ${r.name || ''}<br/>状态：${r.status}${r.taskId ? ' · 任务 #' + r.taskId : ''}` +
-            (r.nextNode ? `<br/>${r.node} → ${r.nextNode} (${Math.round((r.progress || 0) * 100)}%)` : `<br/>位置：${r.node}`)
+          const head = `<b>${r.code}</b> ${r.name || ''}<br/>状态：${r.status}${r.taskId ? ' · 任务 #' + r.taskId : ''}` +
+            (r.nextNode ? `<br/>${r.node} → ${r.nextNode} (${Math.round((r.progress || 0) * 100)}%)` : `<br/>位置：${r.node}`) +
+            `<br/>电量：${r.battery ?? '—'}%` +
+            (r.speed ? `<br/>速度：${r.speed} · 航向：${r.heading}°` : '')
+          return head
         }
-        if (m.kind === 'planned') return `任务 #${m.taskId} 规划路径（${m.priority === 'HIGH' ? '高' : '普通'}优先级）`
+        if (m.kind === 'planned') return m.charging
+          ? `充电任务 #${m.taskId} 回桩路径`
+          : `任务 #${m.taskId} 规划路径（${m.priority === 'HIGH' ? '高' : '普通'}优先级）`
         if (m.kind === 'actual') return `任务 #${m.taskId} 实际轨迹`
         return ''
       }

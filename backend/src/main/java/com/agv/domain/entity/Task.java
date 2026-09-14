@@ -54,6 +54,10 @@ public class Task {
     @Column(name = "to_node", nullable = false, length = 32)
     private String toNode;
 
+    /** 货物重量（kg），派车时校验不超过 AGV 载重能力；充电任务为空 */
+    @Column(name = "payload_weight")
+    private Integer payloadWeight;
+
     /** WMS 期望完成时间（截止时间），越临近越紧急 */
     @Column(name = "deadline")
     private Instant deadline;

@@ -14,6 +14,11 @@ export const TaskAPI = {
 
 export const RobotAPI = {
   list: () => api.get('/robots').then(r => r.data),
+  chargers: () => api.get('/robots/chargers').then(r => r.data),
+  register: (body) => api.post('/robots', body).then(r => r.data),
+  update: (code, body) => api.put(`/robots/${code}`, body).then(r => r.data),
+  deregister: (code) => api.delete(`/robots/${code}`),
+  charge: (code) => api.post(`/robots/${code}/charge`),
   fault: (code, reason) => api.post(`/robots/${code}/fault`, { reason }),
   recover: (code) => api.post(`/robots/${code}/recover`)
 }

@@ -1,10 +1,11 @@
 package com.agv.domain.enums;
 
-/** AGV 状态 */
+/** AGV 运行状态 */
 public enum RobotStatus {
     OFFLINE("离线"),
     IDLE("空闲"),
-    BUSY("忙碌"),
+    BUSY("执行"),
+    CHARGING("充电"),
     FAULT("故障");
 
     private final String label;

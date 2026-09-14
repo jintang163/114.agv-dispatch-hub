@@ -7,6 +7,7 @@ import com.agv.domain.entity.Task;
 import com.agv.domain.entity.TaskEvent;
 import com.agv.domain.enums.TaskPriority;
 import com.agv.domain.enums.TaskStatus;
+import com.agv.domain.enums.TaskType;
 import com.agv.domain.repository.TaskEventRepository;
 import com.agv.domain.repository.TaskRepository;
 import com.agv.infra.mqtt.FleetBroadcaster;
@@ -48,6 +49,9 @@ public class TaskService {
 
     @Transactional
     public Task create(TaskCreateRequest req) {
+        if (req.type() == TaskType.CHARGING) {
+            throw new ApiException("充电任务由系统根据电量自动生成，请使用机器人「立即充电」");
+        }
         if (!topology.contains(req.fromNode())) {
             throw new ApiException("起点不存在: " + req.fromNode());
         }
@@ -65,6 +69,7 @@ public class TaskService {
         task.setFromNode(req.fromNode());
         task.setToNode(req.toNode());
         task.setDeadline(req.deadline());
+        task.setPayloadWeight(req.payloadWeight());
         task.setRemark(req.remark());
         task.setPlannedPath(new ArrayList<>());
         task.setActualPath(new ArrayList<>());
@@ -73,7 +78,8 @@ public class TaskService {
         queue.enqueue(task);
         record(task.getId(), "CREATED", null,
                 "WMS 下发：" + task.getType().getLabel() + " " + req.fromNode() + " → " + req.toNode()
-                        + "，优先级 " + task.getPriority());
+                        + "，优先级 " + task.getPriority()
+                        + (req.payloadWeight() != null ? "，载重 " + req.payloadWeight() + "kg" : ""));
         broadcaster.event("CREATED", "INFO", null, task.getId(),
                 "新任务 " + task.getType().getLabel() + "（" + task.getPriority() + "）进入队列");
         return task;
